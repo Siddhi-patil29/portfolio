@@ -203,24 +203,16 @@ const Home = () => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-      const [profRes, skillRes, projRes, expRes, certRes, eduRes, achRes] = await Promise.all([
-        axios.get(`${API_URL}/profile`, { signal: controller.signal }),
-        axios.get(`${API_URL}/skills`, { signal: controller.signal }),
-        axios.get(`${API_URL}/projects`, { signal: controller.signal }),
-        axios.get(`${API_URL}/experience`, { signal: controller.signal }),
-        axios.get(`${API_URL}/certifications`, { signal: controller.signal }),
-        axios.get(`${API_URL}/education`, { signal: controller.signal }),
-        axios.get(`${API_URL}/achievements`, { signal: controller.signal }),
-      ]);
+      const { data } = await axios.get(`${API_URL}/all`, { signal: controller.signal });
       clearTimeout(timeoutId);
 
-      if (profRes.data) setProfile(profRes.data);
-      if (skillRes.data) setSkills(skillRes.data);
-      if (projRes.data) setProjects(projRes.data);
-      if (expRes.data) setExperience(expRes.data);
-      if (certRes.data) setCertifications(certRes.data);
-      if (eduRes.data) setEducation(eduRes.data);
-      if (achRes.data) setAchievements(achRes.data);
+      if (data.profile) setProfile(data.profile);
+      if (data.skills) setSkills(data.skills);
+      if (data.projects) setProjects(data.projects);
+      if (data.experience) setExperience(data.experience);
+      if (data.certifications) setCertifications(data.certifications);
+      if (data.education) setEducation(data.education);
+      if (data.achievements) setAchievements(data.achievements);
     } catch (error) {
       if (error.name !== 'CanceledError' && error.name !== 'AbortError') {
         console.warn('Backend not reachable, showing fallback data:', error.message);

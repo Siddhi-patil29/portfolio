@@ -53,24 +53,15 @@ const Admin = () => {
     setDataLoading(true);
     setDataError(null);
     try {
-      const [pRes, sRes, prRes, eRes, cRes, edRes, aRes, mRes] = await Promise.all([
-        axios.get(`${API_URL}/profile`),
-        axios.get(`${API_URL}/skills`),
-        axios.get(`${API_URL}/projects`),
-        axios.get(`${API_URL}/experience`),
-        axios.get(`${API_URL}/certifications`),
-        axios.get(`${API_URL}/education`),
-        axios.get(`${API_URL}/achievements`),
-        axios.get(`${API_URL}/contact`)
-      ]);
-      setProfile(pRes.data || {});
-      setSkills(sRes.data || []);
-      setProjects(prRes.data || []);
-      setExperience(eRes.data || []);
-      setCertifications(cRes.data || []);
-      setEducation(edRes.data || []);
-      setAchievements(aRes.data || []);
-      setMessages(mRes.data || []);
+      const { data } = await axios.get(`${API_URL}/all`);
+      setProfile(data.profile || {});
+      setSkills(data.skills || []);
+      setProjects(data.projects || []);
+      setExperience(data.experience || []);
+      setCertifications(data.certifications || []);
+      setEducation(data.education || []);
+      setAchievements(data.achievements || []);
+      setMessages(data.messages || []);
     } catch (err) {
       console.error('Data fetch error', err);
       setDataError(
