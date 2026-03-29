@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { ArrowLeft, Trash2, Plus, LogOut, Save, ArrowUp, ArrowDown, RefreshCw, AlertCircle, CheckCircle } from 'lucide-react';
+import { ArrowLeft, Trash2, Plus, LogOut, Save, ArrowUp, ArrowDown, RefreshCw, AlertCircle, CheckCircle, Wifi, WifiOff } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 const API_URL = 'https://portfolio-backend-i9vy.onrender.com/api';
 const BACKEND_BASE = 'https://portfolio-backend-i9vy.onrender.com';
+const AXIOS_TIMEOUT = 40000; // 40s — enough for Render cold start
 
 // Helper: resolve image URL — Cloudinary images are already full URLs
 const resolveImg = (url) => {
@@ -20,6 +21,12 @@ const Admin = () => {
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState(null);
   const [saveStatus, setSaveStatus] = useState(null); // 'success' | 'error' | null
+
+  // Server wake-up state (shown on login screen)
+  const [serverStatus, setServerStatus] = useState('checking'); // 'checking' | 'online' | 'waking'
+  const [wakeCountdown, setWakeCountdown] = useState(0);
+  const wakeIntervalRef = useRef(null);
+  const wakeTimerRef = useRef(null);
   
   // Data State
   const [profile, setProfile] = useState({});
@@ -45,15 +52,57 @@ const Admin = () => {
   const [achForm, setAchForm] = useState({ title: '', date: '', description: '' });
   const [achImage, setAchImage] = useState(null);
 
+  // Ping server on mount to start warm-up before login
   useEffect(() => {
-    if (isAuthenticated) fetchData();
-  }, [isAuthenticated]);
+    pingServer();
+    return () => {
+      clearInterval(wakeIntervalRef.current);
+      clearTimeout(wakeTimerRef.current);
+    };
+  }, []);
+
+  // Only fetch data once BOTH: user is logged in AND server is confirmed online
+  useEffect(() => {
+    if (isAuthenticated && serverStatus === 'online') {
+      fetchData();
+    }
+  }, [isAuthenticated, serverStatus]);
+
+  const pingServer = async () => {
+    setServerStatus('checking');
+    try {
+      await axios.get(`${BACKEND_BASE}/health`, { timeout: 5000 });
+      setServerStatus('online');
+      clearInterval(wakeIntervalRef.current);
+    } catch {
+      // Server is cold — start visible countdown and keep re-pinging
+      setServerStatus('waking');
+      let count = 50;
+      setWakeCountdown(count);
+      clearInterval(wakeIntervalRef.current);
+      wakeIntervalRef.current = setInterval(() => {
+        count = Math.max(0, count - 1);
+        setWakeCountdown(count);
+      }, 1000);
+      // Re-ping every 6s until online
+      const retry = async () => {
+        try {
+          await axios.get(`${BACKEND_BASE}/health`, { timeout: 6000 });
+          setServerStatus('online');       // triggers fetchData via useEffect
+          clearInterval(wakeIntervalRef.current);
+        } catch {
+          wakeTimerRef.current = setTimeout(retry, 6000);
+        }
+      };
+      wakeTimerRef.current = setTimeout(retry, 6000);
+    }
+  };
 
   const fetchData = async () => {
     setDataLoading(true);
     setDataError(null);
     try {
-      const { data } = await axios.get(`${API_URL}/all`);
+      const { data } = await axios.get(`${API_URL}/all`, { timeout: AXIOS_TIMEOUT });
       setProfile(data.profile || {});
       setSkills(data.skills || []);
       setProjects(data.projects || []);
@@ -62,15 +111,18 @@ const Admin = () => {
       setEducation(data.education || []);
       setAchievements(data.achievements || []);
       setMessages(data.messages || []);
+      setDataError(null);
     } catch (err) {
       console.error('Data fetch error', err);
-      setDataError(
-        err.response?.status === 500
-          ? 'Server error — MONGODB_URI may not be set in Render environment variables.'
-          : err.code === 'ERR_NETWORK'
-          ? 'Cannot reach the server. It may be waking up (takes ~30s on Render free tier). Please retry.'
-          : `Error: ${err.message}`
-      );
+      if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+        setDataError('Server is still waking up. Please wait ~30 seconds and click Retry.');
+      } else if (err.response?.status === 500) {
+        setDataError('Server error — MONGODB_URI may not be set in Render environment variables.');
+      } else if (err.code === 'ERR_NETWORK') {
+        setDataError('Cannot reach the server. It may be waking up (Render free tier takes ~30–45s). Please retry.');
+      } else {
+        setDataError(`Error: ${err.message}`);
+      }
     } finally {
       setDataLoading(false);
     }
@@ -133,7 +185,7 @@ const Admin = () => {
   const deleteRecord = async (endpoint, id) => {
     if (window.confirm('Delete this record?')) {
       try {
-        await axios.delete(`${API_URL}/${endpoint}/${id}`);
+        await axios.delete(`${API_URL}/${endpoint}/${id}`, { timeout: AXIOS_TIMEOUT });
         fetchData();
       } catch (err) { console.error(err); }
     }
@@ -150,7 +202,8 @@ const Admin = () => {
     setListState(newList);
   
     try {
-      await axios.put(`${API_URL}/${endpoint}/reorder`, { orderedIds: newList.map(i => i.id) });
+      // MongoDB uses _id, not id
+      await axios.put(`${API_URL}/${endpoint}/reorder`, { orderedIds: newList.map(i => i._id || i.id) }, { timeout: AXIOS_TIMEOUT });
     } catch (err) {
       console.error(err);
       fetchData(); // Revert on failure
@@ -159,11 +212,28 @@ const Admin = () => {
 
   // ── Login Screen ──
   if (!isAuthenticated) {
+    const isOnline = serverStatus === 'online';
+    const isWaking = serverStatus === 'waking';
+    const isChecking = serverStatus === 'checking';
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div className="glass-panel" style={{ width: '400px', textAlign: 'center', borderTop: '4px solid var(--primary-color)' }}>
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '1.5rem' }}>
+        <div className="glass-panel" style={{ width: '420px', textAlign: 'center', borderTop: '4px solid var(--primary-color)' }}>
           <h2 style={{ marginBottom: '0.5rem', color: 'var(--primary-color)' }}>Admin Access</h2>
-          <p style={{ color: 'var(--text-muted)', marginBottom: '2rem', fontSize: '0.9rem' }}>Enter password to manage your portfolio</p>
+          <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem', fontSize: '0.9rem' }}>Enter password to manage your portfolio</p>
+
+          {/* Server status indicator */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.6rem',
+            padding: '0.6rem 1rem', borderRadius: '8px', marginBottom: '1.5rem', fontSize: '0.85rem', fontWeight: '600',
+            background: isOnline ? 'rgba(34,197,94,0.1)' : isWaking ? 'rgba(251,191,36,0.1)' : 'rgba(148,163,184,0.1)',
+            border: `1px solid ${isOnline ? '#22c55e' : isWaking ? '#fbbf24' : '#64748b'}`,
+            color: isOnline ? '#22c55e' : isWaking ? '#fbbf24' : '#94a3b8'
+          }}>
+            {isOnline && <><CheckCircle size={16} /> Server is online — ready!</>}
+            {isWaking && <><RefreshCw size={16} style={{ animation: 'spin 1s linear infinite' }} /> Waking server up… (~{wakeCountdown}s left)</>}
+            {isChecking && <><RefreshCw size={16} style={{ animation: 'spin 1s linear infinite' }} /> Checking server…</>}
+          </div>
+
           <form onSubmit={handleLogin}>
             <input
               type="password"
@@ -177,7 +247,66 @@ const Admin = () => {
             <button type="submit" className="btn btn-primary" style={{ width: '100%' }}>Login</button>
           </form>
           <p style={{ marginTop: '1rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>Default password: admin123</p>
+          {isWaking && (
+            <p style={{ marginTop: '0.5rem', color: 'var(--text-muted)', fontSize: '0.78rem', lineHeight: 1.5 }}>
+              The server is on Render's free tier and needs ~30–45s to wake up.<br/>
+              You can log in now — data will load once the server is ready.
+            </p>
+          )}
         </div>
+        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  // ── Post-login: Server still waking up ──
+  if (isAuthenticated && serverStatus !== 'online') {
+    const isChecking = serverStatus === 'checking';
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div className="glass-panel" style={{ width: '480px', textAlign: 'center', borderTop: '4px solid #fbbf24' }}>
+          <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>{isChecking ? '🔍' : '⚡'}</div>
+          <h2 style={{ marginBottom: '0.5rem', color: '#fbbf24' }}>
+            {isChecking ? 'Connecting…' : 'Server Waking Up'}
+          </h2>
+          <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem', lineHeight: 1.6 }}>
+            {isChecking
+              ? 'Checking server connection…'
+              : <>The backend is on Render's free tier and goes to sleep after inactivity.<br/>It takes <strong style={{ color: '#fbbf24' }}>~30–50 seconds</strong> to fully wake up.</>}
+          </p>
+
+          {/* Animated progress bar */}
+          {serverStatus === 'waking' && (
+            <>
+              <div style={{ background: 'var(--border-color)', borderRadius: '99px', height: '8px', overflow: 'hidden', marginBottom: '0.75rem' }}>
+                <div style={{
+                  height: '100%', borderRadius: '99px',
+                  background: 'linear-gradient(90deg, #fbbf24, #f59e0b)',
+                  width: `${Math.max(5, 100 - (wakeCountdown / 50) * 100)}%`,
+                  transition: 'width 1s linear'
+                }} />
+              </div>
+              <p style={{ color: '#fbbf24', fontWeight: '600', marginBottom: '1.5rem' }}>
+                {wakeCountdown > 0 ? `~${wakeCountdown}s remaining` : 'Almost ready…'}
+              </p>
+            </>
+          )}
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+            <RefreshCw size={16} style={{ animation: 'spin 1.2s linear infinite' }} />
+            Auto-retrying every 6 seconds…
+          </div>
+
+          <div style={{ marginTop: '1.5rem', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+            <button onClick={pingServer} className="btn btn-primary" style={{ fontSize: '0.85rem' }}>
+              <RefreshCw size={14} style={{ marginRight: '0.4rem' }} /> Retry Now
+            </button>
+            <button onClick={() => setIsAuthenticated(false)} className="btn btn-secondary" style={{ fontSize: '0.85rem' }}>
+              <LogOut size={14} style={{ marginRight: '0.4rem' }} /> Logout
+            </button>
+          </div>
+        </div>
+        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
       </div>
     );
   }
@@ -243,11 +372,11 @@ const Admin = () => {
         </div>
       )}
 
-      {/* ── Loading Overlay ── */}
+      {/* ── Loading Overlay (only shown for refresh, not initial load) ── */}
       {dataLoading && (
         <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
           <RefreshCw size={24} style={{ animation: 'spin 1s linear infinite', marginBottom: '0.5rem' }} />
-          <p>Loading data from server... (server may be waking up)</p>
+          <p>Refreshing data…</p>
         </div>
       )}
 
