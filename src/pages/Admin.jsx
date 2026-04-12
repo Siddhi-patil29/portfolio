@@ -3,9 +3,11 @@ import axios from 'axios';
 import { ArrowLeft, Trash2, Plus, LogOut, Save, ArrowUp, ArrowDown, RefreshCw, AlertCircle, CheckCircle, Wifi, WifiOff } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
-const API_URL = 'https://portfolio-backend-i9vy.onrender.com/api';
-const BACKEND_BASE = 'https://portfolio-backend-i9vy.onrender.com';
-const AXIOS_TIMEOUT = 40000; // 40s — enough for Render cold start
+const API_URL = import.meta.env.VITE_API_URL || 'https://portfolio-backend-i9vy.onrender.com/api';
+const BACKEND_BASE = import.meta.env.VITE_BACKEND_BASE || 'https://portfolio-backend-i9vy.onrender.com';
+const IS_LOCAL = BACKEND_BASE.includes('localhost') || BACKEND_BASE.includes('127.0.0.1');
+const AXIOS_TIMEOUT = IS_LOCAL ? 10000 : 50000; // 10s locally, 50s for cold-start Render
+const HEALTH_CHECK_TIMEOUT = IS_LOCAL ? 5000 : 15000; // faster health check locally
 
 // Helper: resolve image URL — Cloudinary images are already full URLs
 const resolveImg = (url) => {
@@ -24,7 +26,7 @@ const Admin = () => {
 
   // Server wake-up state (shown on login screen)
   const [serverStatus, setServerStatus] = useState('checking'); // 'checking' | 'online' | 'waking'
-  const [wakeCountdown, setWakeCountdown] = useState(0);
+  const [retryCount, setRetryCount] = useState(0);
   const wakeIntervalRef = useRef(null);
   const wakeTimerRef = useRef(null);
   
@@ -56,14 +58,17 @@ const Admin = () => {
   useEffect(() => {
     pingServer();
     return () => {
-      clearInterval(wakeIntervalRef.current);
       clearTimeout(wakeTimerRef.current);
     };
   }, []);
 
   // Only fetch data once BOTH: user is logged in AND server is confirmed online
   useEffect(() => {
-    if (isAuthenticated && serverStatus === 'online') {
+    if (isAuthenticated && (serverStatus === 'online' || serverStatus === 'db_error')) {
+      if (serverStatus === 'db_error') {
+        setDataError('DB_DISCONNECTED: Cannot reach MongoDB Atlas. Your current IP is not whitelisted. Go to MongoDB Atlas → Network Access → Add IP Address → Allow 0.0.0.0/0');
+        return;
+      }
       fetchData();
     }
   }, [isAuthenticated, serverStatus]);
@@ -71,30 +76,43 @@ const Admin = () => {
   const pingServer = async () => {
     setServerStatus('checking');
     try {
-      await axios.get(`${BACKEND_BASE}/health`, { timeout: 5000 });
-      setServerStatus('online');
-      clearInterval(wakeIntervalRef.current);
+      const { data } = await axios.get(`${BACKEND_BASE}/health`, { timeout: HEALTH_CHECK_TIMEOUT });
+      if (data.dbReady === false) {
+        // Server is up but DB is disconnected — special state
+        setServerStatus('db_error');
+      } else {
+        setServerStatus('online');
+      }
     } catch {
-      // Server is cold — start visible countdown and keep re-pinging
-      setServerStatus('waking');
-      let count = 50;
-      setWakeCountdown(count);
-      clearInterval(wakeIntervalRef.current);
-      wakeIntervalRef.current = setInterval(() => {
-        count = Math.max(0, count - 1);
-        setWakeCountdown(count);
-      }, 1000);
-      // Re-ping every 6s until online
-      const retry = async () => {
-        try {
-          await axios.get(`${BACKEND_BASE}/health`, { timeout: 6000 });
-          setServerStatus('online');       // triggers fetchData via useEffect
-          clearInterval(wakeIntervalRef.current);
-        } catch {
-          wakeTimerRef.current = setTimeout(retry, 6000);
-        }
-      };
-      wakeTimerRef.current = setTimeout(retry, 6000);
+      if (IS_LOCAL) {
+        setServerStatus('waking');
+        setRetryCount(prev => prev + 1);
+        const retry = async () => {
+          try {
+            const { data } = await axios.get(`${BACKEND_BASE}/health`, { timeout: 4000 });
+            if (data.dbReady === false) setServerStatus('db_error');
+            else setServerStatus('online');
+          } catch {
+            setRetryCount(prev => prev + 1);
+            wakeTimerRef.current = setTimeout(retry, 3000);
+          }
+        };
+        wakeTimerRef.current = setTimeout(retry, 3000);
+      } else {
+        setServerStatus('waking');
+        setRetryCount(prev => prev + 1);
+        const retry = async () => {
+          try {
+            const { data } = await axios.get(`${BACKEND_BASE}/health`, { timeout: 8000 });
+            if (data.dbReady === false) setServerStatus('db_error');
+            else setServerStatus('online');
+          } catch {
+            setRetryCount(prev => prev + 1);
+            wakeTimerRef.current = setTimeout(retry, 5000);
+          }
+        };
+        wakeTimerRef.current = setTimeout(retry, 5000);
+      }
     }
   };
 
@@ -114,12 +132,17 @@ const Admin = () => {
       setDataError(null);
     } catch (err) {
       console.error('Data fetch error', err);
-      if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
-        setDataError('Server is still waking up. Please wait ~30 seconds and click Retry.');
+      const errData = err.response?.data;
+      if (errData?.error === 'DB_DISCONNECTED') {
+        setDataError('DB_DISCONNECTED: ' + errData.message);
+      } else if (errData?.error === 'DB_CONNECTING') {
+        setDataError('Database is still starting up — please wait 10 seconds and click Retry.');
+      } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+        setDataError('Request timed out. The server may be starting up. Click Retry in a moment.');
       } else if (err.response?.status === 500) {
-        setDataError('Server error — MONGODB_URI may not be set in Render environment variables.');
+        setDataError('Server error — Check your MONGODB_URI in server .env file.');
       } else if (err.code === 'ERR_NETWORK') {
-        setDataError('Cannot reach the server. It may be waking up (Render free tier takes ~30–45s). Please retry.');
+        setDataError('Network error — backend may be offline. Please check the server terminal.');
       } else {
         setDataError(`Error: ${err.message}`);
       }
@@ -135,8 +158,16 @@ const Admin = () => {
 
   const handleLogin = (e) => {
     e.preventDefault();
-    if (password === 'admin123') setIsAuthenticated(true);
-    else alert('Incorrect password');
+    if (password === 'admin123') {
+      setIsAuthenticated(true);
+      // If server is already confirmed online, fetch immediately
+      // (the useEffect will also trigger, but this is a safety net)
+      if (serverStatus === 'online') {
+        setTimeout(() => fetchData(), 100);
+      }
+    } else {
+      alert('Incorrect password');
+    }
   };
 
   const handleProfileSave = async (e) => {
@@ -224,14 +255,19 @@ const Admin = () => {
           {/* Server status indicator */}
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.6rem',
-            padding: '0.6rem 1rem', borderRadius: '8px', marginBottom: '1.5rem', fontSize: '0.85rem', fontWeight: '600',
+            padding: '0.8rem 1rem', borderRadius: '8px', marginBottom: '1.5rem', fontSize: '0.85rem', fontWeight: '600',
             background: isOnline ? 'rgba(34,197,94,0.1)' : isWaking ? 'rgba(251,191,36,0.1)' : 'rgba(148,163,184,0.1)',
             border: `1px solid ${isOnline ? '#22c55e' : isWaking ? '#fbbf24' : '#64748b'}`,
             color: isOnline ? '#22c55e' : isWaking ? '#fbbf24' : '#94a3b8'
           }}>
             {isOnline && <><CheckCircle size={16} /> Server is online — ready!</>}
-            {isWaking && <><RefreshCw size={16} style={{ animation: 'spin 1s linear infinite' }} /> Waking server up… (~{wakeCountdown}s left)</>}
-            {isChecking && <><RefreshCw size={16} style={{ animation: 'spin 1s linear infinite' }} /> Checking server…</>}
+            {isWaking && (
+              <>
+                <RefreshCw size={16} style={{ animation: 'spin 1s linear infinite' }} /> 
+                Waking server ({retryCount})… 
+              </>
+            )}
+            {isChecking && <><RefreshCw size={16} style={{ animation: 'spin 1.2s linear infinite' }} /> Checking connection…</>}
           </div>
 
           <form onSubmit={handleLogin}>
@@ -248,9 +284,10 @@ const Admin = () => {
           </form>
           <p style={{ marginTop: '1rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>Default password: admin123</p>
           {isWaking && (
-            <p style={{ marginTop: '0.5rem', color: 'var(--text-muted)', fontSize: '0.78rem', lineHeight: 1.5 }}>
-              The server is on Render's free tier and needs ~30–45s to wake up.<br/>
-              You can log in now — data will load once the server is ready.
+            <p style={{ marginTop: '0.8rem', color: 'var(--text-muted)', fontSize: '0.78rem', lineHeight: 1.6, background: 'rgba(0,0,0,0.2)', padding: '0.5rem', borderRadius: '4px' }}>
+              {IS_LOCAL
+                ? <><strong style={{color:'#fbbf24'}}>Local server not running!</strong><br/>Run <code style={{background:'rgba(255,255,255,0.1)',padding:'2px 5px',borderRadius:'3px'}}>npm run dev</code> in the server folder.<br/>Then <strong>You can log in now</strong> — data will auto-load.</>
+                : <>The backend is on Render's free tier and needs ~30s to wake up.<br/><strong>You can log in now</strong> — data will load automatically.</>}
             </p>
           )}
         </div>
@@ -267,46 +304,54 @@ const Admin = () => {
         <div className="glass-panel" style={{ width: '480px', textAlign: 'center', borderTop: '4px solid #fbbf24' }}>
           <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>{isChecking ? '🔍' : '⚡'}</div>
           <h2 style={{ marginBottom: '0.5rem', color: '#fbbf24' }}>
-            {isChecking ? 'Connecting…' : 'Server Waking Up'}
+            {isChecking ? 'Connecting…' : 'Server Warming Up'}
           </h2>
           <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem', lineHeight: 1.6 }}>
             {isChecking
-              ? 'Checking server connection…'
-              : <>The backend is on Render's free tier and goes to sleep after inactivity.<br/>It takes <strong style={{ color: '#fbbf24' }}>~30–50 seconds</strong> to fully wake up.</>}
+              ? 'Establishing secure connection to the backend...'
+              : <>Your backend is waking up from its sleep cycle.<br/>This usually takes <strong style={{ color: '#fbbf24' }}>30–45 seconds</strong> on the free tier.</>}
           </p>
 
-          {/* Animated progress bar */}
+          {/* Animated activity indicator */}
           {serverStatus === 'waking' && (
-            <>
-              <div style={{ background: 'var(--border-color)', borderRadius: '99px', height: '8px', overflow: 'hidden', marginBottom: '0.75rem' }}>
+            <div style={{ marginBottom: '1.5rem' }}>
+              <div style={{ background: 'var(--border-color)', borderRadius: '99px', height: '10px', overflow: 'hidden', marginBottom: '0.75rem', position: 'relative' }}>
                 <div style={{
                   height: '100%', borderRadius: '99px',
-                  background: 'linear-gradient(90deg, #fbbf24, #f59e0b)',
-                  width: `${Math.max(5, 100 - (wakeCountdown / 50) * 100)}%`,
-                  transition: 'width 1s linear'
+                  background: 'linear-gradient(90deg, #fbbf24, #f59e0b, #fbbf24)',
+                  backgroundSize: '200% 100%',
+                  width: '40%',
+                  position: 'absolute',
+                  animation: 'shimmer-slide 1.5s infinite linear'
                 }} />
               </div>
-              <p style={{ color: '#fbbf24', fontWeight: '600', marginBottom: '1.5rem' }}>
-                {wakeCountdown > 0 ? `~${wakeCountdown}s remaining` : 'Almost ready…'}
+              <p style={{ color: '#fbbf24', fontWeight: '600', fontSize: '0.9rem' }}>
+                Attempting connection (Attempt #{retryCount})...
               </p>
-            </>
+            </div>
           )}
 
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-            <RefreshCw size={16} style={{ animation: 'spin 1.2s linear infinite' }} />
-            Auto-retrying every 6 seconds…
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+            <RefreshCw size={14} style={{ animation: 'spin 1.2s linear infinite' }} />
+            Automatic retries active...
           </div>
 
-          <div style={{ marginTop: '1.5rem', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+          <div style={{ marginTop: '2rem', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
             <button onClick={pingServer} className="btn btn-primary" style={{ fontSize: '0.85rem' }}>
-              <RefreshCw size={14} style={{ marginRight: '0.4rem' }} /> Retry Now
+              <RefreshCw size={14} style={{ marginRight: '0.4rem' }} /> Force Retry
             </button>
             <button onClick={() => setIsAuthenticated(false)} className="btn btn-secondary" style={{ fontSize: '0.85rem' }}>
-              <LogOut size={14} style={{ marginRight: '0.4rem' }} /> Logout
+              <LogOut size={14} style={{ marginRight: '0.4rem' }} /> Cancel
             </button>
           </div>
         </div>
-        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+        <style>{`
+          @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+          @keyframes shimmer-slide { 
+            0% { left: -40%; }
+            100% { left: 100%; }
+          }
+        `}</style>
       </div>
     );
   }
@@ -363,11 +408,34 @@ const Admin = () => {
         }}>
           <AlertCircle size={20} color="#ef4444" style={{ flexShrink: 0, marginTop: '2px' }} />
           <div style={{ flex: 1 }}>
-            <strong style={{ color: '#ef4444' }}>Connection Error</strong>
-            <p style={{ color: 'var(--text-muted)', margin: '0.25rem 0 0.75rem', fontSize: '0.9rem' }}>{dataError}</p>
-            <button onClick={fetchData} className="btn btn-primary" style={{ fontSize: '0.85rem', padding: '0.4rem 1rem' }}>
-              <RefreshCw size={14} style={{ marginRight: '0.4rem' }} /> Retry Connection
-            </button>
+            {dataError.startsWith('DB_DISCONNECTED') ? (
+              <>
+                <strong style={{ color: '#ef4444', fontSize: '1rem' }}>⚠️ MongoDB Not Connected</strong>
+                <p style={{ color: 'var(--text-muted)', margin: '0.5rem 0', fontSize: '0.9rem', lineHeight: 1.7 }}>
+                  Your computer's IP address is <strong>not whitelisted</strong> in MongoDB Atlas.<br/>
+                  The database cannot be reached from your current network.
+                </p>
+                <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: '6px', padding: '0.75rem 1rem', marginBottom: '0.75rem', fontSize: '0.85rem', lineHeight: 1.8 }}>
+                  <strong style={{ color: '#fbbf24' }}>🔧 How to fix:</strong><br/>
+                  1. Go to <a href="https://cloud.mongodb.com" target="_blank" rel="noreferrer" style={{ color: '#60a5fa' }}>cloud.mongodb.com</a><br/>
+                  2. Click <strong>Network Access</strong> in the left menu<br/>
+                  3. Click <strong>+ Add IP Address</strong><br/>
+                  4. Click <strong>Allow Access from Anywhere</strong> (adds 0.0.0.0/0)<br/>
+                  5. Click <strong>Confirm</strong> — then click Retry below
+                </div>
+                <button onClick={fetchData} className="btn btn-primary" style={{ fontSize: '0.85rem', padding: '0.4rem 1rem' }}>
+                  <RefreshCw size={14} style={{ marginRight: '0.4rem' }} /> Retry Connection
+                </button>
+              </>
+            ) : (
+              <>
+                <strong style={{ color: '#ef4444' }}>Connection Error</strong>
+                <p style={{ color: 'var(--text-muted)', margin: '0.25rem 0 0.75rem', fontSize: '0.9rem' }}>{dataError}</p>
+                <button onClick={fetchData} className="btn btn-primary" style={{ fontSize: '0.85rem', padding: '0.4rem 1rem' }}>
+                  <RefreshCw size={14} style={{ marginRight: '0.4rem' }} /> Retry Connection
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}

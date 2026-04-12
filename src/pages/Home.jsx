@@ -7,8 +7,8 @@ import {
   ExternalLink, MapPin, Zap, Globe, Sun, Moon, RefreshCw
 } from 'lucide-react';
 
-const API_URL = 'https://portfolio-backend-i9vy.onrender.com/api';
-const BACKEND_BASE = 'https://portfolio-backend-i9vy.onrender.com';
+const API_URL = import.meta.env.VITE_API_URL || 'https://portfolio-backend-i9vy.onrender.com/api';
+const BACKEND_BASE = import.meta.env.VITE_BACKEND_BASE || 'https://portfolio-backend-i9vy.onrender.com';
 
 // Helper: resolve image URL — Cloudinary images are already full URLs
 const resolveImg = (url) => {
@@ -199,11 +199,11 @@ const Home = () => {
     setSyncing(true);
     setSyncError(false);
     try {
-      // 15 second timeout — Render cold start can take up to 60s but we won't block the UI
+      // 30 second timeout — Render cold start can take time, but minimal fetch is faster
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-      const { data } = await axios.get(`${API_URL}/all`, { signal: controller.signal });
+      const { data } = await axios.get(`${API_URL}/all?minimal=true`, { signal: controller.signal });
       clearTimeout(timeoutId);
 
       if (data.profile) setProfile(data.profile);

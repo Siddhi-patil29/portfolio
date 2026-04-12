@@ -14,7 +14,16 @@
     "lucide-react": "^0.577.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "react-router-dom": "^7.13.1"
+    "react-router-dom": "^7.13.1",
+    "cloudinary": "1.41.3",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.21.2",
+    "mongoose": "8.13.2",
+    "multer": "1.4.5-lts.1",
+    "nodemailer": "6.9.16",
+    "serverless-http": "^3.2.0",
+    "streamifier": "0.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
